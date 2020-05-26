@@ -74,10 +74,12 @@ class AccountInvoice(models.Model):
             self.message_post(
                 subtype='account_invoice_change_currency.mt_currency_update',
                 tracking_value_ids=tracking_value_ids)
+            round_curr = invoice.currency_id.round
             for line in invoice.invoice_line_ids:
-                line.price_unit *= rate
+                line.price_unit = round_curr(line.price_unit * rate)
             for tax in invoice.tax_line_ids:
-                tax.amount *= rate
+                tax.amount = round_curr(tax.amount * rate)
+            invoice.compute_taxes()
 
     @api.onchange('currency_id', 'date_invoice')
     def _onchange_currency_change_rate(self):
