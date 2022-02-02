@@ -58,22 +58,6 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
                 "reconcile": True,
             }
         )
-        self.sequence = self.env["ir.sequence"].create(
-            {
-                "name": "Journal Sale",
-                "prefix": "SALE",
-                "padding": 6,
-                "company_id": self.env.ref("base.main_company").id,
-            }
-        )
-        self.account_journal_sale = self.env["account.journal"].create(
-            {
-                "name": "Sale journal",
-                "code": "SALE",
-                "type": "sale",
-                "sequence_id": self.sequence.id,
-            }
-        )
         self.product_1 = self.env["product.product"].create({"name": "Product 1"})
         self.product_2 = self.env["product.product"].create({"name": "Product 2"})
         self.analytic_account = self.env["account.analytic.account"].create(
@@ -90,9 +74,34 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
             limit=1,
         )
 
-    def create_simple_invoice(self, date=False, context=None, inv_type=None):
+    def create_journal_type(self, type_string=None):
+        if not type_string:
+            type_string = "purchase"
+        sequence = self.env["ir.sequence"].create(
+            {
+                "name": "Journal",
+                "prefix": type_string,
+                "padding": 6,
+                "company_id": self.env.ref("base.main_company").id,
+            }
+        )
+        account_journal_type = self.env["account.journal"].create(
+            {
+                "name": "Journal",
+                "code": type_string,
+                "type": type_string,
+                "sequence": sequence.id,
+            }
+        )
+        return account_journal_type
+
+    def create_simple_invoice(
+        self, date=False, context=None, inv_type=None, journal=None
+    ):
         if not context:
             context = {}
+        if not journal:
+            journal = self.create_journal_type(type_string="purchase")
         invoice_lines = [
             (
                 0,
@@ -124,8 +133,8 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
             .create(
                 {
                     "partner_id": 1,
-                    "type": inv_type or "in_invoice",
-                    "journal_id": self.account_journal_sale.id,
+                    "move_type": inv_type or "in_invoice",
+                    "journal_id": journal.id,
                     "invoice_date": date,
                     "currency_id": self.env.ref("base.EUR").id,
                     "invoice_line_ids": invoice_lines,
@@ -146,9 +155,8 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
         expected_value = before_curr._convert(
             before_amount, after_curr, inv.company_id, fields.Date.today()
         )
-
         self.assertEqual(
-            float_compare(inv.amount_total, expected_value, 1),
+            float_compare(inv.amount_total, expected_value, 0),
             0,
             "Total amount of invoice does not equal to expected value!!!",
         )
@@ -156,7 +164,7 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
     def test_change_validated_invoice_currency(self):
         inv = self.create_simple_invoice(fields.Date.today())
         before_amount = inv.amount_total
-        inv.post()
+        inv.action_post()
         # Make sure that we can not change the currency after validated:
         inv.write({"currency_id": self.env.ref("base.USD").id})
         inv._onchange_currency_change_rate()
@@ -310,8 +318,11 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
         )
 
     def test_force_custom_rate(self):
-        inv = self.create_simple_invoice(context={"force_rate": True})
-        inv2 = self.create_simple_invoice()
+        journal = self.create_journal_type(type_string="purchase")
+        inv = self.create_simple_invoice(context={"force_rate": True}, journal=journal)
+        inv2 = self.create_simple_invoice(
+            context={"force_rate": False}, journal=journal
+        )
         self.assertNotEqual(
             inv.custom_rate, inv2.custom_rate, "Rates must be different!"
         )
@@ -324,7 +335,8 @@ class TestAccountInvoiceChangeCurrency(common.TransactionCase):
         )
 
     def test_not_currency_change(self):
-        inv = self.create_simple_invoice(inv_type="out_invoice")
+        journal = self.create_journal_type(type_string="sale")
+        inv = self.create_simple_invoice(inv_type="out_invoice", journal=journal)
         before_amount = inv.amount_total
         inv.action_account_change_currency()
         self.assertEqual(

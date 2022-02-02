@@ -21,6 +21,7 @@ class AccountMove(models.Model):
         if self.env.context.get("force_rate"):
             invoice._toggle_forced_rate()
         invoice._onchange_currency_change_rate()
+        invoice.track_created_invoice()
         return invoice
 
     def action_account_change_currency(self):
@@ -58,7 +59,6 @@ class AccountMove(models.Model):
                 invoice.custom_rate = new_rate
             if not old_rate_currency and currency_skip == currency:
                 continue
-
             rate = currency.with_context(**ctx)._get_conversion_rate(
                 from_currency, currency, invoice.company_id, invoice_date
             )
@@ -71,27 +71,33 @@ class AccountMove(models.Model):
                     0,
                     0,
                     track.create_tracking_values(
-                        currency,
+                        from_currency,
                         currency,
                         "currency_id",
                         self.fields_get(["currency_id"])["currency_id"],
                         100,
+                        self._name,
                     ),
                 ],
                 [
                     0,
                     0,
                     track.create_tracking_values(
-                        new_rate,
-                        new_rate,
+                        old_rate,
+                        rate,
                         "rate",
                         currency.fields_get(["rate"])["rate"],
                         100,
+                        "res.currency",
                     ),
                 ],
             ]
             self.message_post(
-                subtype="account_invoice_change_currency.mt_currency_update",
+                subtype_id=(
+                    self.env.ref(
+                        "account_invoice_change_currency.mt_currency_update"
+                    ).id
+                ),
                 tracking_value_ids=tracking_value_ids,
             )
             for line in invoice.invoice_line_ids:
@@ -130,14 +136,19 @@ class AccountMove(models.Model):
         query = """
 SELECT mtv.old_value_integer, mtv.new_value_integer, mm.subtype_id
 FROM mail_tracking_value as mtv INNER JOIN mail_message AS mm
-ON mtv.mail_message_id = mm.id """
+ON mtv.mail_message_id = mm.id INNER JOIN
+ir_model_fields AS field
+ON field.id = mtv.field """
         if skip_update_currency:
             query += " AND mm.subtype_id != %s "
-            params = (subtype_id.id, tuple(self.message_ids.ids))
+            params = (subtype_id.id, self._name, tuple(self.message_ids.ids))
         else:
-            params = (tuple(self.message_ids.ids),)
-        query += """WHERE mtv.field = 'currency_id' AND
-mtv.mail_message_id IN %s
+            params = (
+                self._name,
+                tuple(self.message_ids.ids),
+            )
+        query += """ WHERE field.name = 'currency_id' AND
+field.model = %s AND mtv.mail_message_id IN %s
 ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
         self.env.cr.execute(query, params)
         res = self.env.cr.dictfetchone()
@@ -151,27 +162,37 @@ ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
     def get_last_rate(self):
         self.ensure_one()
         subtype_create_id = self.env.ref("account.mt_invoice_created")
+        ir_model_fields = self.env["ir.model.fields"]
+        ir_model_fields_ids = (
+            ir_model_fields.sudo()
+            .search(
+                [
+                    ("name", "in", ["rate", "currency_id"]),
+                    ("model", "in", [self._name, "res.currency"]),
+                ]
+            )
+            .ids
+        )
         last_values = (
             self.env["mail.tracking.value"]
             .sudo()
             .search(
                 [
                     ("mail_message_id", "in", self.message_ids.ids),
-                    ("field", "in", ["rate", "currency_id"]),
+                    ("field", "in", ir_model_fields_ids),
                 ],
                 limit=2,
                 order="write_date desc, id desc",
             )
         )
         # if rate and currency come from same message_id
-        if (
-            len(last_values) == 2
-            and last_values[0].mail_message_id == last_values[1].mail_message_id
-        ):
-            currency_value, rate_value = sorted(last_values, key=lambda r: r.field)
+        if len(last_values) == 2:
+            currency_value, rate_value = sorted(
+                last_values, key=lambda r: r.field.id, reverse=True
+            )
             return (
-                self.currency_id.browse(currency_value.old_value_integer),
-                rate_value.old_value_float,
+                self.currency_id.browse(currency_value.new_value_integer),
+                rate_value.new_value_float,
             )
         if (
             len(last_values) == 1
@@ -192,10 +213,16 @@ ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
     def get_force_rate_state(self):
         self.ensure_one()
         subtype_id = self.env.ref("account_invoice_change_currency.mt_force_rate")
+        ir_model_fields = self.env["ir.model.fields"]
+        ir_model_fields_id = (
+            ir_model_fields.sudo()
+            .search([("name", "=", "to_check"), ("model", "=", self._name)])
+            .id
+        )
         domain = [
             ("mail_message_id", "in", self.message_ids.ids),
             ("mail_message_id.subtype_id", "=", subtype_id.id),
-            ("field", "=", "force_rate"),
+            ("field", "=", ir_model_fields_id),
         ]
         last_value = (
             self.env["mail.tracking.value"]
@@ -213,7 +240,12 @@ ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
                 0,
                 0,
                 track.create_tracking_values(
-                    force, force, "force_rate", force_rate_description, 100
+                    force,
+                    not force,
+                    "to_check",
+                    force_rate_description,
+                    100,
+                    self._name,
                 ),
             ],
             [
@@ -225,6 +257,7 @@ ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
                     "currency_id",
                     self.fields_get(["currency_id"])["currency_id"],
                     100,
+                    self._name,
                 ),
             ],
             [
@@ -236,10 +269,55 @@ ORDER BY mtv.write_date DESC, mtv.id DESC LIMIT 1"""
                     "rate",
                     self.fields_get(["custom_rate"])["custom_rate"],
                     100,
+                    "res.currency",
                 ),
             ],
         ]
         self.message_post(
-            subtype="account_invoice_change_currency.mt_force_rate",
+            subtype_id=self.env.ref("account_invoice_change_currency.mt_force_rate").id,
             tracking_value_ids=tracking_value_ids,
         )
+
+    def track_created_invoice(self):
+        track = self.env["mail.tracking.value"]
+        today = fields.Date.today()
+        for invoice in self.filtered(lambda x: x.state == "draft").with_context(
+            {"check_move_validity": False}
+        ):
+            invoice_date = invoice.invoice_date or today
+            ctx = {"company_id": invoice.company_id.id, "date": invoice_date}
+            currency = invoice.with_context(**ctx).currency_id
+            tracking_value_ids = [
+                [
+                    0,
+                    0,
+                    track.create_tracking_values(
+                        None,
+                        self.currency_id,
+                        "currency_id",
+                        self.fields_get(["currency_id"])["currency_id"],
+                        100,
+                        self._name,
+                    ),
+                ],
+                [
+                    0,
+                    0,
+                    track.create_tracking_values(
+                        None,
+                        self.custom_rate,
+                        "rate",
+                        currency.fields_get(["rate"])["rate"],
+                        100,
+                        "res.currency",
+                    ),
+                ],
+            ]
+            self.message_post(
+                subtype_id=(
+                    self.env.ref(
+                        "account_invoice_change_currency.mt_currency_update"
+                    ).id
+                ),
+                tracking_value_ids=tracking_value_ids,
+            )

@@ -18,7 +18,7 @@
                         options="{'no_create': True, 'no_open': True}"
                         class="oe_inline"
                     />
-                    - <field
+                    <field
                         name="custom_rate"
                         placeholder="Custom Rate"
                         class="oe_inline"
